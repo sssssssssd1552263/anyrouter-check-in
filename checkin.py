@@ -16,7 +16,6 @@ if hasattr(sys.stderr, 'reconfigure'):
 	sys.stderr.reconfigure(line_buffering=True)
 
 import httpx
-from cloakbrowser import launch_async
 from dotenv import load_dotenv
 
 from utils.browser import (
@@ -36,7 +35,7 @@ from utils.browser import (
 from utils.config import AccountConfig, AppConfig, load_accounts_config
 from utils.debug import debug_print, is_debug_enabled
 from utils.notify import notify
-from utils.proxy import get_playwright_proxy, get_proxy_server
+from utils.proxy import get_proxy_server
 
 load_dotenv()
 
@@ -87,56 +86,52 @@ def parse_cookies(cookies_data):
 	return {}
 
 
-async def get_waf_cookies_with_browser(
-	account_name: str,
-	login_url: str,
-	required_cookies: list[str],
-	*,
-	use_proxy: bool = False,
-):
+async def get_waf_cookies_with_browser(account_name: str, provider_config) -> dict | None:
 	"""使用浏览器获取 WAF cookies"""
 	print(f'[PROCESSING] {account_name}: Starting browser to get WAF cookies...')
 
-	launch_kwargs: dict = {'headless': True}
-	proxy = get_playwright_proxy(use_proxy=use_proxy)
-	if proxy:
-		launch_kwargs['proxy'] = proxy
-	browser = await launch_async(**launch_kwargs)
-
+	context = None
 	try:
-		page = await browser.new_page()
+		settings = load_browser_login_settings(account_name, provider_config.name, persist_profile=False)
+		print(
+			f'[INFO] {account_name}: WAF browser headless={settings.headless}, '
+			f'humanize={settings.humanize}, timeout={settings.wait_timeout_ms}ms'
+		)
+		context = await launch_login_context(settings, use_proxy=provider_config.use_proxy)
+		page = await context.new_page()
 		await prepare_browser_page(page)
 		print(f'[PROCESSING] {account_name}: Access login page to get initial cookies...')
 
-		await page.goto(login_url, wait_until='domcontentloaded')
-		await wait_for_waf_ready(page)
+		login_url = f'{provider_config.domain}{provider_config.login_path}'
+		await page.goto(login_url, wait_until='domcontentloaded', timeout=settings.wait_timeout_ms)
+		print(f'[PROCESSING] {account_name}: Waiting for WAF readiness...')
+		await wait_for_waf_ready(page, settings.wait_timeout_ms)
 
-		cookies = await page.context.cookies()
+		cookies = await context.cookies(f'{provider_config.domain}{provider_config.user_info_path}')
 
-		waf_cookies = {}
-		for cookie in cookies:
-			cookie_name = cookie.get('name')
-			cookie_value = cookie.get('value')
-			if cookie_name in required_cookies and cookie_value is not None:
-				waf_cookies[cookie_name] = cookie_value
+		waf_cookies = {
+			cookie['name']: cookie['value']
+			for cookie in cookies
+			if cookie.get('name') and cookie.get('value') is not None
+		}
 
-		print(f'[INFO] {account_name}: Got {len(waf_cookies)} WAF cookies')
+		print(f'[INFO] {account_name}: Got {len(waf_cookies)} site cookies for the API: {sorted(waf_cookies)}')
 
-		missing_cookies = [c for c in required_cookies if c not in waf_cookies]
+		missing_cookies = [c for c in provider_config.waf_cookie_names if c not in waf_cookies]
 
 		if missing_cookies:
 			print(f'[FAILED] {account_name}: Missing WAF cookies: {missing_cookies}')
-			await browser.close()
 			return None
 
 		print(f'[SUCCESS] {account_name}: Successfully got all WAF cookies')
-		await browser.close()
 		return waf_cookies
 
 	except Exception as e:
-		print(f'[FAILED] {account_name}: Error occurred while getting WAF cookies: {e}')
-		await browser.close()
+		print(f'[FAILED] {account_name}: Error occurred while getting WAF cookies: {type(e).__name__}')
 		return None
+	finally:
+		if context is not None:
+			await context.close()
 
 
 async def login_with_credentials(
@@ -240,7 +235,23 @@ def get_user_info(client, headers, user_info_url: str):
 		response = client.get(user_info_url, headers=headers, timeout=30)
 
 		if response.status_code == 200:
-			data = response.json()
+			try:
+				data = response.json()
+			except ValueError:
+				content_type = response.headers.get('content-type', 'unknown')
+				content_encoding = response.headers.get('content-encoding', 'none')
+				body = response.content
+				is_html = 'html' in content_type.lower() or body.lstrip()[:32].lower().startswith(
+					(b'<!doctype html', b'<html')
+				)
+				return {
+					'success': False,
+					'error': (
+						f'Failed to get user info: HTTP {response.status_code}, non-JSON response '
+						f'(Content-Type={content_type}, Content-Encoding={content_encoding}, '
+						f'body_bytes={len(body)}, HTML={is_html})'
+					),
+				}
 			if data.get('success'):
 				user_data = data.get('data', {})
 				quota = round(user_data.get('quota', 0) / 500000, 2)
@@ -261,13 +272,7 @@ async def prepare_cookies(account_name: str, provider_config, user_cookies: dict
 	waf_cookies = {}
 
 	if provider_config.needs_waf_cookies():
-		login_url = f'{provider_config.domain}{provider_config.login_path}'
-		waf_cookies = await get_waf_cookies_with_browser(
-			account_name,
-			login_url,
-			provider_config.waf_cookie_names,
-			use_proxy=provider_config.use_proxy,
-		)
+		waf_cookies = await get_waf_cookies_with_browser(account_name, provider_config)
 		if not waf_cookies:
 			print(f'[FAILED] {account_name}: Unable to get WAF cookies')
 			return None
