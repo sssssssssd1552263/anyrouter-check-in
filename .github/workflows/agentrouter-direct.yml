@@ -1,1 +1,81 @@
+name: AgentRouter Direct HTTPX Diagnostic
 
+on:
+  workflow_dispatch:
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 5
+    steps:
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: Install HTTPX
+        run: python -m pip install --quiet httpx==0.28.1
+      - name: Diagnose AgentRouter directly
+        env:
+          ANYROUTER_ACCOUNTS: ${{ secrets.ANYROUTER_ACCOUNTS }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import sys
+
+          import httpx
+
+          try:
+              accounts = [a for a in json.loads(os.environ['ANYROUTER_ACCOUNTS']) if a.get('provider') == 'agentrouter']
+              for account in accounts:
+                  session = account['cookies']['session']
+                  if not isinstance(session, str) or not session:
+                      raise ValueError('Missing session')
+                  masked = session.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+                  print(f'::add-mask::{masked}', flush=True)
+              if len(accounts) != 3:
+                  raise ValueError('Expected three AgentRouter accounts')
+          except Exception as exc:
+              print(f'Configuration error: {type(exc).__name__}')
+              print('Success 0/3')
+              print('Failed 3/3')
+              sys.exit(1)
+
+          success_count = 0
+          for index, account in enumerate(accounts, 1):
+              name = account.get('name') or f'AgentRouter {index}'
+              try:
+                  response = httpx.get(
+                      'https://agentrouter.org/api/user/self',
+                      headers={'New-Api-User': str(account['api_user']), 'Accept': 'application/json'},
+                      cookies=account['cookies'],
+                      follow_redirects=False,
+                      timeout=20,
+                  )
+                  content_type = response.headers.get('content-type', 'unknown')
+                  print(f'{name}: HTTP={response.status_code}; Content-Type={content_type}; body_bytes={len(response.content)}')
+                  try:
+                      payload = response.json()
+                  except ValueError:
+                      text = response.text.lower()
+                      is_html = 'html' in content_type.lower() or text.lstrip().startswith(('<!doctype html', '<html'))
+                      waf = any(marker in text for marker in (
+                          'acw_', 'aliyun', 'captcha', 'cloudflare', 'cdn-cgi',
+                          'verify you are human', '请进行验证', '访问受限',
+                      ))
+                      print(f'{name}: JSON=False; HTML={is_html}; WAF={waf}')
+                      continue
+                  json_success = isinstance(payload, dict) and payload.get('success') is True
+                  id_match = (
+                      isinstance(payload, dict) and isinstance(payload.get('data'), dict)
+                      and str(payload['data'].get('id')) == str(account['api_user'])
+                  )
+                  print(f'{name}: JSON=True; success={json_success}; id_match={id_match}')
+                  success_count += int(response.status_code == 200 and json_success and id_match)
+              except Exception as exc:
+                  print(f'{name}: HTTP=None; error={type(exc).__name__}')
+
+          print(f'Success {success_count}/3')
+          print(f'Failed {3 - success_count}/3')
+          sys.exit(0 if success_count == 3 else 1)
+          PY
