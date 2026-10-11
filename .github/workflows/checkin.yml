@@ -106,7 +106,22 @@ jobs:
         BARK_KEY: ${{ secrets.BARK_KEY }}
         BARK_SERVER: ${{ secrets.BARK_SERVER }}
       run: |
-        xvfb-run -a --server-args="-screen 0 1920x1080x24" uv run checkin.py
+        xvfb-run -a --server-args="-screen 0 1920x1080x24" uv run python - <<'PY'
+        import json
+        import os
+        import runpy
+
+        accounts = json.loads(os.environ['ANYROUTER_ACCOUNTS'])
+        for account in accounts:
+            if account.get('provider') == 'agentrouter' and account.get('name') == 'Agent-3':
+                print(f"[INFO] Agent-3: configured api_user={account.get('api_user')}", flush=True)
+                # shortcut: normalize the old ID until the stored Secret can be corrected.
+                if str(account.get('api_user')) == '582844':
+                    account['api_user'] = '582845'
+                    print('[INFO] Agent-3: corrected legacy user ID to 582845', flush=True)
+        os.environ['ANYROUTER_ACCOUNTS'] = json.dumps(accounts)
+        runpy.run_path('checkin.py', run_name='__main__')
+        PY
 
     - name: 上传调试截图
       if: always() && env.DEBUG_MODE == 'true'
