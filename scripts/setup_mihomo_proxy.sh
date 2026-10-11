@@ -51,6 +51,7 @@ unified-delay: true
 proxy-providers:
   subscription:
     type: http
+    proxy: DIRECT
     url: "${PROXY_SUBSCRIPTION_URL}"
     # shortcut: match the desktop node; update the filter if the subscription renames it.
     filter: '^2x专线-日本-1$'
