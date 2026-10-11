@@ -41,6 +41,13 @@ jobs:
           restore-keys: ${{ runner.os }}-cloakbrowser-
       - name: Install CloakBrowser
         run: uv run python -m cloakbrowser install
+      - name: Configure proxy
+        env:
+          PROXY_SUBSCRIPTION_URL: ${{ secrets.PROXY_SUBSCRIPTION_URL }}
+          PROXY_TEST_URL: https://www.google.com/generate_204
+          MIHOMO_VERSION: v1.19.27
+          PROXY_REQUIRED: 'true'
+        run: bash scripts/setup_mihomo_proxy.sh
       - name: Diagnose AgentRouter through the browser
         env:
           ANYROUTER_ACCOUNTS: ${{ secrets.ANYROUTER_ACCOUNTS }}
@@ -61,6 +68,10 @@ jobs:
           try:
               accounts = [a for a in json.loads(os.environ['ANYROUTER_ACCOUNTS']) if a.get('provider') == 'agentrouter']
               for account in accounts:
+                  # shortcut: normalize the old ID until the stored Secret can be corrected.
+                  if account.get('name') == 'Agent-3' and str(account.get('api_user')) == '582844':
+                      account['api_user'] = '582845'
+                      print('[INFO] Agent-3: corrected legacy user ID to 582845', flush=True)
                   session = account['cookies']['session']
                   if not isinstance(session, str) or not session:
                       raise ValueError('Missing session')
@@ -81,7 +92,7 @@ jobs:
               success = False
               try:
                   settings = load_browser_login_settings(name, 'agentrouter', persist_profile=False)
-                  context = await launch_login_context(settings, use_proxy=False)
+                  context = await launch_login_context(settings, use_proxy=True)
                   await context.add_cookies([{
                       'name': 'session', 'value': account['cookies']['session'],
                       'url': 'https://ps.air-outer.com/', 'secure': True, 'httpOnly': True,
