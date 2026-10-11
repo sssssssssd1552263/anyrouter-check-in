@@ -9,6 +9,10 @@
 set -euo pipefail
 
 if [[ -z "${PROXY_SUBSCRIPTION_URL:-}" ]]; then
+	if [[ "${PROXY_REQUIRED:-false}" == "true" ]]; then
+		echo "[FAILED] Required proxy subscription is not set"
+		exit 1
+	fi
 	echo "[INFO] PROXY_SUBSCRIPTION_URL not set, skip proxy setup"
 	exit 0
 fi
@@ -48,6 +52,8 @@ proxy-providers:
   subscription:
     type: http
     url: "${PROXY_SUBSCRIPTION_URL}"
+    # shortcut: match the desktop node; update the filter if the subscription renames it.
+    filter: '^2x专线-日本-1$'
     interval: 3600
     path: ./subscription.yaml
     health-check:
@@ -58,6 +64,7 @@ proxy-providers:
 proxy-groups:
   - name: CHECKIN
     type: url-test
+    empty-fallback: REJECT
     url: "${PROXY_TEST_URL}"
     interval: 300
     tolerance: 150
