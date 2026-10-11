@@ -2,7 +2,7 @@ import asyncio
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, call
 
 import httpx
 import pytest
@@ -137,6 +137,8 @@ def test_non_json_user_info_reports_only_response_metadata(content_type, body, i
 		('without_proxy', None, True),
 		('html_then_json', None, True),
 		('html_timeout', None, False),
+		('login_timeout', None, False),
+		('readiness_timeout', None, False),
 		('bad_json', None, False),
 		('http_status', 401, False),
 		('success', 1, False),
@@ -156,6 +158,7 @@ def test_non_json_user_info_reports_only_response_metadata(content_type, body, i
 )
 async def test_browser_api_fallback_validates_identity_and_balance(monkeypatch, capsys, field, value, expected_success):
 	provider = ProviderConfig(name='agentrouter', domain='https://provider.test', sign_in_path=None, use_proxy=field != 'without_proxy')
+	login_url = f'{provider.domain}{provider.login_path}'
 	api_url = f'{provider.domain}{provider.user_info_path}'
 	payload = {'success': True, 'data': {'id': 123, 'quota': 1250000, 'used_quota': 250000}}
 	if field in payload:
@@ -172,7 +175,13 @@ async def test_browser_api_fallback_validates_identity_and_balance(monkeypatch, 
 	)
 	page = SimpleNamespace(on=Mock())
 
-	async def navigate(*args, **kwargs):
+	async def navigate(url, **kwargs):
+		if url != api_url:
+			assert url == login_url
+			if field == 'login_timeout':
+				raise TimeoutError('private-login-page')
+			return
+		ready.assert_awaited_once_with(page, 60_000)
 		callback = page.on.call_args.args[1]
 		await callback(SimpleNamespace(url=f'{api_url}/unrelated'))
 		if field in {'html_then_json', 'html_timeout'}:
@@ -195,7 +204,11 @@ async def test_browser_api_fallback_validates_identity_and_balance(monkeypatch, 
 		close=AsyncMock(side_effect=RuntimeError('private-cleanup') if field == 'cleanup_error' else None),
 	)
 	launch = AsyncMock(return_value=context)
+	prepare = AsyncMock()
+	ready = AsyncMock(side_effect=TimeoutError('private-readiness') if field == 'readiness_timeout' else None)
 	monkeypatch.setattr('checkin.launch_login_context', launch)
+	monkeypatch.setattr('checkin.prepare_browser_page', prepare)
+	monkeypatch.setattr('checkin.wait_for_waf_ready', ready)
 	actual_timeout = asyncio.timeout
 	timeout_calls = []
 
@@ -217,8 +230,16 @@ async def test_browser_api_fallback_validates_identity_and_balance(monkeypatch, 
 	context.add_cookies.assert_awaited_once_with([
 		{'name': 'session', 'value': 'private-session', 'url': f'{provider.domain}/', 'secure': True, 'httpOnly': True}
 	])
-	context.set_extra_http_headers.assert_awaited_once_with({provider.api_user_key: '123', 'Accept': 'application/json'})
-	page.goto.assert_awaited_once_with(api_url, wait_until='commit', timeout=60_000)
+	context.set_extra_http_headers.assert_awaited_once_with({provider.api_user_key: '123'})
+	prepare.assert_awaited_once_with(page)
+	navigations = [call(login_url, wait_until='domcontentloaded', timeout=60_000)]
+	if field == 'login_timeout':
+		ready.assert_not_awaited()
+	else:
+		ready.assert_awaited_once_with(page, 60_000)
+	if field not in {'login_timeout', 'readiness_timeout'}:
+		navigations.append(call(api_url, wait_until='commit', timeout=60_000))
+	assert page.goto.await_args_list == navigations
 	assert timeout_calls == [60]
 	context.close.assert_awaited_once()
 	if expected_success:
