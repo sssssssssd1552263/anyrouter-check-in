@@ -43,6 +43,9 @@ jobs:
         uv sync --frozen
         echo "✅ 环境初始化完成"
 
+    - name: 验证签到回归测试
+      run: uv run pytest tests/test_checkin_state.py -q -o addopts=''
+
     - name: 安装系统依赖
       run: |
         sudo apt-get update
