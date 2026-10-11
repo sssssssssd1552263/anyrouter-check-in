@@ -269,7 +269,7 @@ def get_user_info(client, headers, user_info_url: str):
 
 
 async def get_user_info_with_browser(account_name: str, provider_config, user_cookies: dict, api_user) -> dict | None:
-	"""在独立浏览器中验证自动签到接口，最多等待一次页面请求完成。"""
+	"""在同一浏览器中完成登录页就绪和自动签到接口校验。"""
 	if not api_user or not str(api_user).strip():
 		print(f'[FAILED] {account_name}: Browser API fallback requires an account user ID')
 		return None
@@ -290,7 +290,7 @@ async def get_user_info_with_browser(account_name: str, provider_config, user_co
 			}
 			for name, value in user_cookies.items()
 		])
-		await context.set_extra_http_headers({provider_config.api_user_key: str(api_user), 'Accept': 'application/json'})
+		await context.set_extra_http_headers({provider_config.api_user_key: str(api_user)})
 		page = await context.new_page()
 		user_info_url = f'{provider_config.domain}{provider_config.user_info_path}'
 		received = asyncio.get_running_loop().create_future()
@@ -328,6 +328,9 @@ async def get_user_info_with_browser(account_name: str, provider_config, user_co
 
 		page.on('response', on_response)
 		async with asyncio.timeout(60):
+			await prepare_browser_page(page)
+			await page.goto(f'{provider_config.domain}{provider_config.login_path}', wait_until='domcontentloaded', timeout=60_000)
+			await wait_for_waf_ready(page, 60_000)
 			try:
 				await page.goto(user_info_url, wait_until='commit', timeout=60_000)
 			except Exception as e:
