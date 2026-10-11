@@ -1,4 +1,4 @@
-name: AgentRouter Browser API Diagnostic
+name: AgentRouter Backup API Diagnostic
 
 on:
   workflow_dispatch:
@@ -7,56 +7,23 @@ jobs:
   diagnose:
     runs-on: ubuntu-latest
     environment: production
-    timeout-minutes: 10
-    env:
-      PYTHONIOENCODING: utf-8
-      PYTHONUNBUFFERED: '1'
-      DEBUG_MODE: 'false'
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v6
-      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
-        with:
-          version: latest
       - uses: actions/setup-python@v6
         with:
           python-version: '3.11'
-      - name: Cache UV dependencies
-        uses: actions/cache@v5
-        with:
-          path: ~/.cache/uv
-          key: ${{ runner.os }}-uv-${{ hashFiles('pyproject.toml', 'uv.lock') }}
-          restore-keys: ${{ runner.os }}-uv-
-      - name: Install dependencies
-        run: uv sync --frozen
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y xvfb fonts-noto-color-emoji fonts-freefont-ttf fonts-unifont \
-            fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf
-      - name: Cache CloakBrowser binary
-        uses: actions/cache@v5
-        with:
-          path: ~/.cloakbrowser
-          key: ${{ runner.os }}-cloakbrowser-v1
-          restore-keys: ${{ runner.os }}-cloakbrowser-
-      - name: Install CloakBrowser
-        run: uv run python -m cloakbrowser install
-      - name: Diagnose AgentRouter through the browser
+      - name: Install HTTPX
+        run: python -m pip install --quiet httpx==0.28.1
+      - name: Diagnose AgentRouter directly
         env:
           ANYROUTER_ACCOUNTS: ${{ secrets.ANYROUTER_ACCOUNTS }}
-          CHECKIN_HEADLESS: 'false'
-          CHECKIN_HUMANIZE: 'true'
-          CHECKIN_WAIT_TIMEOUT_MS: '60000'
         run: |
-          xvfb-run -a --server-args="-screen 0 1920x1080x24" uv run python - <<'PY'
-          import asyncio
+          python - <<'PY'
           import json
           import os
           import sys
 
-          from utils.browser import load_browser_login_settings, launch_login_context
-
-          API_URL = 'https://agentrouter.org/api/user/self'
+          import httpx
 
           try:
               accounts = [a for a in json.loads(os.environ['ANYROUTER_ACCOUNTS']) if a.get('provider') == 'agentrouter']
@@ -74,89 +41,41 @@ jobs:
               print('Failed 3/3')
               sys.exit(1)
 
-          async def check_account(account, index):
+          success_count = 0
+          for index, account in enumerate(accounts, 1):
               name = account.get('name') or f'AgentRouter {index}'
-              context = None
-              page = None
-              success = False
               try:
-                  settings = load_browser_login_settings(name, 'agentrouter', persist_profile=False)
-                  context = await launch_login_context(settings, use_proxy=False)
-                  await context.add_cookies([{
-                      'name': 'session', 'value': account['cookies']['session'],
-                      'url': 'https://agentrouter.org/', 'secure': True, 'httpOnly': True,
-                  }])
-                  await context.set_extra_http_headers({
-                      'New-Api-User': str(account['api_user']), 'Accept': 'application/json',
-                  })
-                  page = await context.new_page()
-                  received = asyncio.get_running_loop().create_future()
-
-                  async def on_response(response):
-                      if response.url != API_URL or received.done():
-                          return
-                      content_type = response.headers.get('content-type', 'unknown')
-                      print(f'{name}: HTTP={response.status}; Content-Type={content_type}')
-                      if 'application/json' not in content_type.lower():
-                          return
-                      try:
-                          payload = await response.json()
-                      except Exception:
-                          payload = None
-                      if received.done():
-                          return
-                      json_success = isinstance(payload, dict) and payload.get('success') is True
-                      id_match = (
-                          isinstance(payload, dict) and isinstance(payload.get('data'), dict)
-                          and str(payload['data'].get('id')) == str(account['api_user'])
-                      )
-                      print(f'{name}: JSON=True; success={json_success}; id_match={id_match}')
-                      if not received.done():
-                          received.set_result(response.status == 200 and json_success and id_match)
-
-                  page.on('response', on_response)
-                  async with asyncio.timeout(60):
-                      try:
-                          await page.goto(API_URL, wait_until='commit', timeout=60_000)
-                      except Exception as exc:
-                          print(f'{name}: navigation_error={type(exc).__name__}')
-                      success = await received
+                  response = httpx.get(
+                      'https://ps.air-outer.com/api/user/self',
+                      headers={'New-Api-User': str(account['api_user']), 'Accept': 'application/json'},
+                      cookies=account['cookies'],
+                      follow_redirects=False,
+                      timeout=20,
+                  )
+                  content_type = response.headers.get('content-type', 'unknown')
+                  print(f'{name}: HTTP={response.status_code}; Content-Type={content_type}; body_bytes={len(response.content)}')
+                  try:
+                      payload = response.json()
+                  except ValueError:
+                      text = response.text.lower()
+                      is_html = 'html' in content_type.lower() or text.lstrip().startswith(('<!doctype html', '<html'))
+                      waf = any(marker in text for marker in (
+                          'acw_', 'aliyun', 'captcha', 'cloudflare', 'cdn-cgi',
+                          'verify you are human', '请进行验证', '访问受限',
+                      ))
+                      print(f'{name}: JSON=False; HTML={is_html}; WAF={waf}')
+                      continue
+                  json_success = isinstance(payload, dict) and payload.get('success') is True
+                  id_match = (
+                      isinstance(payload, dict) and isinstance(payload.get('data'), dict)
+                      and str(payload['data'].get('id')) == str(account['api_user'])
+                  )
+                  print(f'{name}: JSON=True; success={json_success}; id_match={id_match}')
+                  success_count += int(response.status_code == 200 and json_success and id_match)
               except Exception as exc:
-                  print(f'{name}: error={type(exc).__name__}')
-              finally:
-                  if not success and page is not None:
-                      try:
-                          async with asyncio.timeout(5):
-                              title = ' '.join((await page.title()).split())[:100]
-                              html = (await page.content()).lower()
-                              names = sorted({cookie['name'] for cookie in await context.cookies(API_URL)})
-                              is_html = '<html' in html or '<!doctype html' in html
-                              waf = any(marker in html for marker in (
-                                  'acw_', 'aliyun', 'cloudflare', 'cdn-cgi',
-                                  'verify you are human', '请进行验证', '访问受限',
-                              ))
-                              captcha = any(marker in html for marker in (
-                                  'captcha', 'turnstile', 'nocaptcha', '滑动验证', '滑块验证', '人机验证',
-                              ))
-                              print(f'{name}: title={json.dumps(title, ensure_ascii=False)}; Cookies={names}; '
-                                    f'HTML={is_html}; WAF={waf}; CAPTCHA={captcha}')
-                      except Exception as exc:
-                          print(f'{name}: diagnostics_error={type(exc).__name__}')
-                  if context is not None:
-                      try:
-                          await context.close()
-                      except Exception as exc:
-                          print(f'{name}: close_error={type(exc).__name__}')
-                          success = False
-              return success
+                  print(f'{name}: HTTP=None; error={type(exc).__name__}')
 
-          async def main():
-              success_count = 0
-              for index, account in enumerate(accounts, 1):
-                  success_count += int(await check_account(account, index))
-              print(f'Success {success_count}/3')
-              print(f'Failed {3 - success_count}/3')
-              return 0 if success_count == 3 else 1
-
-          sys.exit(asyncio.run(main()))
+          print(f'Success {success_count}/3')
+          print(f'Failed {3 - success_count}/3')
+          sys.exit(0 if success_count == 3 else 1)
           PY
