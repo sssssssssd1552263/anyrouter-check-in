@@ -6,6 +6,7 @@ AnyRouter.top 自动签到脚本
 import asyncio
 import hashlib
 import json
+import math
 import os
 import sys
 from datetime import datetime
@@ -267,6 +268,85 @@ def get_user_info(client, headers, user_info_url: str):
 		return {'success': False, 'error': f'Failed to get user info: {str(e)[:50]}...'}
 
 
+async def get_user_info_with_browser(account_name: str, provider_config, user_cookies: dict, api_user) -> dict | None:
+	"""在独立浏览器中验证自动签到接口，最多等待一次页面请求完成。"""
+	if not api_user or not str(api_user).strip():
+		print(f'[FAILED] {account_name}: Browser API fallback requires an account user ID')
+		return None
+
+	print(f'[PROCESSING] {account_name}: Trying one browser API fallback after session request failure')
+	context = None
+	info = None
+	try:
+		settings = load_browser_login_settings(account_name, provider_config.name, persist_profile=False)
+		context = await launch_login_context(settings, use_proxy=provider_config.use_proxy)
+		await context.add_cookies([
+			{
+				'name': name,
+				'value': value,
+				'url': f'{provider_config.domain.rstrip("/")}/',
+				'secure': provider_config.domain.startswith('https://'),
+				'httpOnly': name == 'session',
+			}
+			for name, value in user_cookies.items()
+		])
+		await context.set_extra_http_headers({provider_config.api_user_key: str(api_user), 'Accept': 'application/json'})
+		page = await context.new_page()
+		user_info_url = f'{provider_config.domain}{provider_config.user_info_path}'
+		received = asyncio.get_running_loop().create_future()
+
+		async def on_response(response):
+			if response.url != user_info_url or received.done():
+				return
+			if 'application/json' not in response.headers.get('content-type', '').lower():
+				return
+			result = None
+			try:
+				payload = await response.json()
+				data = payload.get('data') if isinstance(payload, dict) else None
+				if (
+					response.status != 200
+					or not isinstance(data, dict)
+					or payload.get('success') is not True
+					or str(data.get('id')) != str(api_user)
+				):
+					raise ValueError('Invalid browser API identity or status')
+				balances = [data.get(key) for key in ('quota', 'used_quota')]
+				if any(type(value) not in (int, float) or not math.isfinite(value) or value < 0 for value in balances):
+					raise ValueError('Invalid browser API balance')
+				quota, used_quota = (round(value / 500000, 2) for value in balances)
+				result = {
+					'success': True,
+					'quota': quota,
+					'used_quota': used_quota,
+					'display': f':money: Current balance: ${quota}, Used: ${used_quota}',
+				}
+			except Exception as e:
+				print(f'[FAILED] {account_name}: Browser API response rejected: {type(e).__name__}')
+			if not received.done():
+				received.set_result(result)
+
+		page.on('response', on_response)
+		async with asyncio.timeout(60):
+			try:
+				await page.goto(user_info_url, wait_until='commit', timeout=60_000)
+			except Exception as e:
+				print(f'[INFO] {account_name}: Browser API navigation: {type(e).__name__}')
+			info = await received
+	except Exception as e:
+		print(f'[FAILED] {account_name}: Browser API fallback failed: {type(e).__name__}')
+	finally:
+		if context is not None:
+			try:
+				await context.close()
+			except Exception as e:
+				print(f'[FAILED] {account_name}: Browser API cleanup failed: {type(e).__name__}')
+				info = None
+	if info:
+		print(f'[SUCCESS] {account_name}: Browser API verified; additional reward not verified')
+	return info
+
+
 async def prepare_cookies(account_name: str, provider_config, user_cookies: dict) -> dict | None:
 	"""准备请求所需的 cookies（可能包含 WAF cookies）"""
 	waf_cookies = {}
@@ -322,6 +402,13 @@ def execute_check_in(client, account_name: str, provider_config, headers: dict):
 
 def format_check_in_notification(detail: dict) -> str:
 	"""格式化签到通知消息"""
+	if 'before_quota' not in detail:
+		return '\n'.join([
+			f'[CHECK-IN] {detail["name"]}',
+			'  ━━━━━━━━━━━━━━━━━━━━',
+			f'  当前余额: ${detail["after_quota"]:.2f}  |  累计消耗: ${detail["after_used"]:.2f}',
+			'  接口验证通过；新增奖励未核实（仅取得一次余额快照）',
+		])
 	lines = [
 		f'[CHECK-IN] {detail["name"]}',
 		'  ━━━━━━━━━━━━━━━━━━━━',
@@ -396,19 +483,27 @@ async def check_in_account(account: AccountConfig, account_index: int, app_confi
 		all_cookies = await prepare_cookies(account_name, provider_config, user_cookies)
 		auth_method = 'session cookies'
 
-	if not all_cookies:
-		return False, None, None
-
-	print(f'[AUTH] {account_name}: Using auth method -> {auth_method}')
-
-	return run_check_in_requests(
-		all_cookies,
-		account,
-		account_name,
-		provider_config,
-		api_user_override=resolved_api_user,
-		use_proxy=provider_config.use_proxy,
-	)
+	result = (False, None, None)
+	if all_cookies:
+		print(f'[AUTH] {account_name}: Using auth method -> {auth_method}')
+		result = run_check_in_requests(
+			all_cookies,
+			account,
+			account_name,
+			provider_config,
+			api_user_override=resolved_api_user,
+			use_proxy=provider_config.use_proxy,
+		)
+	if (
+		not result[0]
+		and account.provider == 'agentrouter'
+		and auth_method == 'session cookies'
+		and not provider_config.needs_manual_check_in()
+	):
+		info = await get_user_info_with_browser(account_name, provider_config, user_cookies, account.api_user)
+		if info:
+			return True, None, info
+	return result
 
 
 def run_check_in_requests(
@@ -559,6 +654,13 @@ async def main():
 						'check_in_reward': check_in_reward,
 						'usage_increase': usage_increase,
 						'balance_change': balance_change,
+						'success': success,
+					}
+				else:
+					account_check_in_details[account_key] = {
+						'name': account.get_display_name(i),
+						'after_quota': current_quota,
+						'after_used': current_used,
 						'success': success,
 					}
 
