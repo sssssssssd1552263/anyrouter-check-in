@@ -477,7 +477,12 @@ async def verify_browser_login(page: Page, console_url: str, timeout_ms: int) ->
 
 
 async def wait_for_waf_ready(page: Page, timeout_ms: int = WAF_READY_TIMEOUT_MS) -> None:
-	await wait_for_site_ready(page, timeout_ms)
+	"""Cookie 登录必须确认 WAF 就绪，超时交由调用方处理。"""
+	await page.wait_for_load_state('domcontentloaded', timeout=timeout_ms)
+	await page.wait_for_function(_SITE_READY_JS, timeout=timeout_ms)
+	closed = await dismiss_popups(page)
+	if closed:
+		print(f'[INFO] Dismissed {closed} popup dialog(s)')
 
 
 async def _first_visible_locator(page: Page, selectors: tuple[str, ...]) -> Locator | None:
