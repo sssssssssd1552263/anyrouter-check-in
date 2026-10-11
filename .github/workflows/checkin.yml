@@ -72,14 +72,6 @@ jobs:
           balance-hash-${{ github.ref_name }}-
           balance-hash-
 
-    - name: 恢复浏览器 Profile 缓存
-      uses: actions/cache@v5
-      with:
-        path: .browser_profiles
-        key: browser-profiles-${{ runner.os }}-v1
-        restore-keys: |
-          browser-profiles-${{ runner.os }}-
-
     - name: 配置代理
       env:
         PROXY_SUBSCRIPTION_URL: ${{ secrets.PROXY_SUBSCRIPTION_URL }}
