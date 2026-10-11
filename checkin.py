@@ -639,7 +639,7 @@ async def main():
 	else:
 		print('[INFO] All accounts successful and no balance changes detected, notification skipped')
 
-	sys.exit(0 if success_count > 0 else 1)
+	sys.exit(0 if success_count == total_count else 1)
 
 
 def run_main():
