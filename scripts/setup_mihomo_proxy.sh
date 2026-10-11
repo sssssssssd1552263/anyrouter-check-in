@@ -53,8 +53,8 @@ proxy-providers:
     type: http
     proxy: DIRECT
     url: "${PROXY_SUBSCRIPTION_URL}"
-    # shortcut: match the desktop node; update the filter if the subscription renames it.
-    filter: '^2x专线-日本-1$'
+    # shortcut: use the user-confirmed node; update the filter if the subscription renames it.
+    filter: '^新加坡1\|高速下载\|移动优化$'
     interval: 3600
     path: ./subscription.yaml
     health-check:
