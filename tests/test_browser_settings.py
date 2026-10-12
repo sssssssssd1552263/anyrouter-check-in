@@ -4,6 +4,21 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+
+def test_github_request_cookie_header_is_scoped_to_github():
+	from utils.browser import _github_browser_cookies
+	cookies = _github_browser_cookies('user_session=private; __Host-user_session_same_site=other; logged_in=yes')
+	assert len(cookies) == 3
+	assert all(c['url'] == 'https://github.com/' and c['secure'] and c['httpOnly'] for c in cookies)
+	assert cookies[1]['name'] == '__Host-user_session_same_site'
+
+
+@pytest.mark.parametrize('header', ['logged_in=yes', 'user_session=a\r\nHost: evil.test'])
+def test_github_request_cookie_header_rejects_missing_auth_and_newlines(header):
+	from utils.browser import _github_browser_cookies
+	with pytest.raises(ValueError):
+		_github_browser_cookies(header)
+
 from utils.browser import _github_browser_cookies, launch_login_context, load_browser_login_settings, login_with_github_cookies
 
 
