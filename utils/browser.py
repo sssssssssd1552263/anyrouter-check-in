@@ -9,7 +9,6 @@ import re
 import time
 from dataclasses import dataclass
 from datetime import datetime
-from http.cookies import SimpleCookie
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 from urllib.parse import parse_qs, urlsplit
@@ -242,11 +241,17 @@ def _github_browser_cookies(cookies: list[dict] | str) -> list[dict]:
 	if isinstance(cookies, str):
 		if '\r' in cookies or '\n' in cookies:
 			raise ValueError('Invalid GitHub Cookie header')
-		parsed = SimpleCookie()
-		parsed.load(cookies)
-		if not any(name in parsed and parsed[name].value for name in ('user_session', '__Host-user_session_same_site')):
+		parsed = {}
+		for part in cookies.split(';'):
+			if not part.strip():
+				continue
+			name, separator, value = part.lstrip(' \t').partition('=')
+			if not separator or not re.fullmatch(r'[A-Za-z0-9_.-]+', name):
+				raise ValueError('Invalid GitHub Cookie name or pair')
+			parsed[name] = value
+		if not any(parsed.get(name) for name in ('user_session', '__Host-user_session_same_site')):
 			raise ValueError('GitHub authenticated Cookie header required')
-		return [{'name': key, 'value': value.value, 'url': 'https://github.com/', 'secure': True, 'httpOnly': True}
+		return [{'name': key, 'value': value, 'url': 'https://github.com/', 'secure': True, 'httpOnly': True}
 			for key, value in parsed.items()]
 	if not isinstance(cookies, list) or not cookies:
 		raise ValueError('GitHub browser cookies must be a nonempty list')
