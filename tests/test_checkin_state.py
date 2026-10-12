@@ -301,7 +301,7 @@ async def test_browser_fallback_only_follows_failed_agentrouter_session_auto_che
 	if use_fallback:
 		fallback.assert_awaited_once_with('Agent test', provider, user_cookies, '123')
 	if use_fallback and browser_success:
-		assert result == (True, None, info)
+		assert result == (None, None, info)
 	else:
 		assert result == (primary_result if primary_used else (False, None, None))
 	assert user_cookies == {'session': 'private-original-session'}
@@ -311,7 +311,7 @@ async def test_browser_fallback_only_follows_failed_agentrouter_session_auto_che
 async def test_single_snapshot_notification_keeps_balance_without_claiming_reward(monkeypatch, before):
 	account = AccountConfig(cookies={}, name='Agent test', provider='agentrouter')
 	info = {'success': True, 'quota': 12.34, 'used_quota': 5.67, 'display': 'current balance'}
-	check_account = AsyncMock(return_value=(True, before, info))
+	check_account = AsyncMock(return_value=(None, before, info))
 	save_hash = Mock()
 	push = Mock()
 	monkeypatch.setattr('checkin.is_debug_enabled', lambda: False)
@@ -325,13 +325,76 @@ async def test_single_snapshot_notification_keeps_balance_without_claiming_rewar
 	with pytest.raises(SystemExit) as exited:
 		await main()
 
-	assert exited.value.code == 0
+	assert exited.value.code == 1
 	check_account.assert_awaited_once()
 	push.assert_called_once()
 	message = push.call_args.args[1]
 	assert '当前余额: $12.34' in message
 	assert '累计消耗: $5.67' in message
-	assert '新增奖励未核实' in message
-	assert 'Success: 1/1' in message
+	assert '新增奖励金额未单独核实' in message
+	assert 'Success: 0/1' in message
+	assert 'Unverified: 1/1' in message
+	assert 'Failed: 0/1' in message
 	assert not any(claim in message for claim in ('签到获得', '今日已签到', '签到前', '签到后'))
 	save_hash.assert_called_once_with(generate_balance_hash({'account_1': {'quota': 12.34, 'used': 5.67}}))
+
+
+@pytest.mark.parametrize('payload, expected', [
+	({'success': True}, True),
+	({'ret': 1}, True),
+	({'code': 0}, True),
+	({'success': False, 'code': 0}, False),
+	({'success': 'false'}, False),
+	({'success': False, 'message': '已签到'}, True),
+	({}, False),
+	([], False),
+	('unsuccessful', False),
+])
+def test_manual_signin_requires_explicit_json_result(payload, expected):
+	from checkin import execute_check_in
+	response = Mock(status_code=200)
+	if isinstance(payload, str):
+		response.json.side_effect = ValueError('not JSON')
+		response.text = payload
+	else:
+		response.json.return_value = payload
+	client = Mock()
+	client.post.return_value = response
+	provider = ProviderConfig(name='anyrouter', domain='https://provider.test')
+	assert execute_check_in(client, 'test', provider, {}) is expected
+
+
+def test_user_info_success_without_login_cannot_confirm_signin(monkeypatch):
+	from checkin import run_check_in_requests
+	provider = ProviderConfig(name='agentrouter', domain='https://provider.test', sign_in_path=None)
+	account = AccountConfig(cookies={'session': 'test'}, api_user='123', provider='agentrouter')
+	info = {'success': True, 'quota': 10.0, 'used_quota': 2.0, 'display': 'balance'}
+	client = Mock()
+	client.__enter__ = Mock(return_value=client)
+	client.__exit__ = Mock(return_value=False)
+	monkeypatch.setattr('checkin.httpx.Client', Mock(return_value=client))
+	monkeypatch.setattr('checkin.get_user_info', Mock(return_value=info))
+	assert run_check_in_requests(account.cookies, account, 'test', provider) == (None, info, info)
+
+
+@pytest.mark.parametrize('success', [True, None, False])
+def test_unchanged_balance_does_not_invent_daily_reward(success):
+	from checkin import format_check_in_notification
+	detail = dict(name='test', success=success, before_quota=10, before_used=2,
+		after_quota=10, after_used=2, credit_change=0, usage_increase=0, balance_change=0)
+	message = format_check_in_notification(detail)
+	assert '今日已签到' not in message
+	assert '签到获得' not in message
+	assert '两次余额快照无变化' in message
+
+
+async def test_github_login_uses_account_specific_state(monkeypatch):
+	import json
+	provider = ProviderConfig(name='agentrouter', domain='https://provider.test', sign_in_path=None)
+	account = AccountConfig(cookies={'session': 'old'}, api_user='123', provider='agentrouter', name='Agent test')
+	github_cookies = [{'name': 'user_session', 'value': 'private', 'domain': 'github.com', 'path': '/'}]
+	monkeypatch.setenv('AGENTROUTER_GITHUB_COOKIES', json.dumps({'123': github_cookies, '456': []}))
+	login = AsyncMock(return_value=(True, None, None))
+	monkeypatch.setattr('checkin.login_with_github_cookies', login)
+	assert await check_in_account(account, 0, AppConfig(providers={'agentrouter': provider})) == (True, None, None)
+	login.assert_awaited_once_with('Agent test', provider, '123', github_cookies)
