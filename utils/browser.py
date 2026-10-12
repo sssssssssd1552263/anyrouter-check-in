@@ -9,6 +9,7 @@ import re
 import time
 from dataclasses import dataclass
 from datetime import datetime
+from http.cookies import SimpleCookie
 from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import parse_qs, urlsplit
@@ -237,7 +238,16 @@ async def launch_login_context(settings: BrowserLoginSettings, *, use_proxy: boo
 	return _EphemeralBrowserContext(context, browser)
 
 
-def _github_browser_cookies(cookies: list[dict]) -> list[dict]:
+def _github_browser_cookies(cookies: list[dict] | str) -> list[dict]:
+	if isinstance(cookies, str):
+		if '\r' in cookies or '\n' in cookies:
+			raise ValueError('Invalid GitHub Cookie header')
+		parsed = SimpleCookie()
+		parsed.load(cookies)
+		if 'user_session' not in parsed or not parsed['user_session'].value:
+			raise ValueError('GitHub authenticated Cookie header required')
+		return [{'name': key, 'value': value.value, 'url': 'https://github.com/', 'secure': True, 'httpOnly': True}
+			for key, value in parsed.items()]
 	if not isinstance(cookies, list) or not cookies:
 		raise ValueError('GitHub browser cookies must be a nonempty list')
 	result = []
@@ -270,7 +280,7 @@ def _github_browser_cookies(cookies: list[dict]) -> list[dict]:
 
 
 async def login_with_github_cookies(
-	account_name: str, provider_config, api_user, github_cookies: list[dict]
+	account_name: str, provider_config, api_user, github_cookies: list[dict] | str
 ) -> tuple[bool | None, None, dict | None]:
 	"""仅用本次 GitHub OAuth 回调确认奖励，不复用站点登录态。"""
 	context = None
