@@ -412,6 +412,8 @@ def format_check_in_notification(detail: dict) -> str:
 	"""格式化签到通知消息"""
 	if detail['success'] is True:
 		status = '  签到接口已确认成功或已签到'
+	elif detail['success'] == 'no_reward':
+		status = '  重新登录成功；服务端明确返回本次未发放新奖励'
 	elif detail['success'] is None:
 		status = '  签到未核实；用户信息接口通过不代表签到成功'
 	else:
@@ -422,7 +424,7 @@ def format_check_in_notification(detail: dict) -> str:
 			'  ━━━━━━━━━━━━━━━━━━━━',
 			status,
 			f'  当前余额: ${detail["after_quota"]:.2f}  |  累计消耗: ${detail["after_used"]:.2f}',
-			'  新增奖励金额未单独核实（仅取得一次余额快照）',
+			'  余额仅用于展示' if detail['success'] == 'no_reward' else '  新增奖励金额未单独核实（仅取得一次余额快照）',
 		])
 	lines = [
 		f'[CHECK-IN] {detail["name"]}',
@@ -632,6 +634,7 @@ async def main():
 	last_balance_hash = load_balance_hash()
 
 	success_count = 0
+	no_reward_count = 0
 	unverified_count = 0
 	total_count = len(accounts)
 	notification_content = []
@@ -646,6 +649,8 @@ async def main():
 			success, user_info_before, user_info_after = await check_in_account(account, i, app_config)
 			if success is True:
 				success_count += 1
+			elif success == 'no_reward':
+				no_reward_count += 1
 			elif success is None:
 				unverified_count += 1
 
@@ -737,23 +742,20 @@ async def main():
 	if current_balance_hash:
 		save_balance_hash(current_balance_hash)
 
+	completed_count = success_count + no_reward_count
+	summary = [
+		'[STATS] Check-in result statistics:',
+		f'[SUCCESS] Success: {success_count}/{total_count}',
+		f'[NO_REWARD] Login completed, no new reward: {no_reward_count}/{total_count}',
+		f'[UNVERIFIED] Unverified: {unverified_count}/{total_count}',
+		f'[FAIL] Failed: {total_count - completed_count - unverified_count}/{total_count}',
+	]
+	if completed_count == total_count:
+		summary.append('[COMPLETE] All account requests completed; reward outcomes are listed separately')
+	else:
+		summary.append('[WARN] Some accounts failed or lack check-in confirmation')
+
 	if need_notify and notification_content:
-		summary = [
-			'[STATS] Check-in result statistics:',
-			f'[SUCCESS] Success: {success_count}/{total_count}',
-			f'[UNVERIFIED] Unverified: {unverified_count}/{total_count}',
-			f'[FAIL] Failed: {total_count - success_count - unverified_count}/{total_count}',
-		]
-
-		if success_count == total_count:
-			summary.append('[SUCCESS] All accounts check-in successful!')
-		elif success_count > 0:
-			summary.append('[WARN] Some accounts check-in successful')
-		elif unverified_count:
-			summary.append('[WARN] Check-in remains unverified; no reward confirmation received')
-		else:
-			summary.append('[ERROR] All accounts check-in failed')
-
 		time_info = f'[TIME] Execution time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}'
 
 		notify_content = '\n\n'.join([time_info, '\n'.join(notification_content), '\n'.join(summary)])
@@ -773,9 +775,10 @@ async def main():
 		notify.push_message('AnyRouter Check-in Alert', notify_content, msg_type='text')
 		print('[NOTIFY] Notification sent due to failures or balance changes')
 	else:
-		print('[INFO] All accounts successful and no balance changes detected, notification skipped')
+		print('\n'.join(summary))
+		print('[INFO] No notification needed; see account outcomes above')
 
-	sys.exit(0 if success_count == total_count else 1)
+	sys.exit(0 if completed_count == total_count else 1)
 
 
 def run_main():
