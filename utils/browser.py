@@ -244,7 +244,7 @@ def _github_browser_cookies(cookies: list[dict] | str) -> list[dict]:
 			raise ValueError('Invalid GitHub Cookie header')
 		parsed = SimpleCookie()
 		parsed.load(cookies)
-		if 'user_session' not in parsed or not parsed['user_session'].value:
+		if not any(name in parsed and parsed[name].value for name in ('user_session', '__Host-user_session_same_site')):
 			raise ValueError('GitHub authenticated Cookie header required')
 		return [{'name': key, 'value': value.value, 'url': 'https://github.com/', 'secure': True, 'httpOnly': True}
 			for key, value in parsed.items()]
