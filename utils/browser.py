@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from http.cookies import SimpleCookie
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 from urllib.parse import parse_qs, urlsplit
 
 from utils.debug import debug_print, is_debug_enabled
@@ -281,10 +281,11 @@ def _github_browser_cookies(cookies: list[dict] | str) -> list[dict]:
 
 async def login_with_github_cookies(
 	account_name: str, provider_config, api_user, github_cookies: list[dict] | str
-) -> tuple[bool | None, None, dict | None]:
+) -> tuple[bool | Literal['no_reward'] | None, None, dict | None]:
 	"""仅用本次 GitHub OAuth 回调确认奖励，不复用站点登录态。"""
 	context = None
 	result = (False, None, None)
+	stage = 'cookie validation'
 	try:
 		if not api_user or not str(api_user).strip():
 			raise ValueError('Expected account user ID is required')
@@ -312,20 +313,30 @@ async def login_with_github_cookies(
 				if all(type(value) in (int, float) and math.isfinite(value) and value >= 0 for value in balances):
 					quota, used = (round(value / 500000, 2) for value in balances)
 					info = {'success': True, 'quota': quota, 'used_quota': used, 'display': f':money: Current balance: ${quota}, Used: ${used}'}
-				callback_result = (True if data.get('checked_in') is True else None, None, info)
+				outcome: bool | Literal['no_reward'] | None = None
+				if data.get('checked_in') is True:
+					outcome = True
+				elif data.get('checked_in') is False:
+					outcome = 'no_reward'
+				callback_result = (outcome, None, info)
 			except Exception:
 				print(f'[FAILED] {account_name}: GitHub OAuth response rejected')
 			if not received.done():
 				received.set_result(callback_result)
 
 		async with asyncio.timeout(settings.wait_timeout_ms / 1000):
+			stage = 'browser launch'
 			context = await launch_login_context(settings, use_proxy=provider_config.use_proxy)
+			stage = 'cookie import'
 			await context.add_cookies(cookies)
+			stage = 'provider navigation'
 			page = await context.new_page()
 			await prepare_browser_page(page)
 			await page.goto(f'{provider_config.domain.rstrip("/")}{provider_config.login_path}', wait_until='domcontentloaded', timeout=settings.wait_timeout_ms)
+			stage = 'provider readiness'
 			await wait_for_waf_ready(page, settings.wait_timeout_ms)
 			context.on('response', on_response)
+			stage = 'GitHub button'
 			button = await _first_visible_locator(page, (
 				'button:has(.semi-icon-github)', 'button:has([aria-label*="github" i])',
 			))
@@ -333,13 +344,39 @@ async def login_with_github_cookies(
 				button = page.get_by_role('button', name=re.compile('github', re.I)).first
 			# GitHub consent, CAPTCHA and two-factor prompts require an interactive login.
 			await button.click(timeout=min(settings.wait_timeout_ms, FORM_ACTION_TIMEOUT_MS))
+			stage = 'awaiting OAuth'
 			result = await received
 			if result[0] is True:
 				print(f'[SUCCESS] {account_name}: Server confirmed this login reward (checked_in=true)')
+			elif result[0] == 'no_reward':
+				print(f'[INFO] {account_name}: Login completed; server reports no new credit this run (checked_in=false)')
 			elif result[0] is None:
 				print(f'[UNVERIFIED] {account_name}: Login completed without new credit confirmation')
-	except Exception:
-		print(f'[FAILED] {account_name}: GitHub login required or OAuth unavailable; refresh the authorized browser login')
+	except Exception as exc:
+		print(f'[FAILED] {account_name}: GitHub OAuth failed at {stage} ({type(exc).__name__})')
+		if type(exc).__name__ == 'TimeoutError' and context is not None:
+			try:
+				page_kinds = set()
+				for tab in context.pages:
+					location = urlsplit(tab.url)
+					kind = 'other page'
+					if location.hostname == 'github.com':
+						if location.path.startswith('/login/oauth/authorize'):
+							kind = 'GitHub authorization'
+						elif any(part in location.path for part in ('two-factor', 'challenge', 'verified-device', 'sudo', 'captcha')):
+							kind = 'GitHub challenge'
+						elif location.path in ('/login', '/session', '/sessions'):
+							kind = 'GitHub login'
+						else:
+							kind = 'GitHub other'
+					elif (location.scheme, location.netloc) == (origin.scheme, origin.netloc):
+						kind = 'provider callback' if location.path.startswith('/oauth/') else 'provider other'
+						if location.path == provider_config.login_path:
+							kind = 'provider login'
+					page_kinds.add(kind)
+				print(f'[INFO] {account_name}: OAuth timeout page types: {", ".join(sorted(page_kinds)) or "none"}')
+			except Exception:
+				print(f'[INFO] {account_name}: OAuth timeout page types unavailable')
 	finally:
 		if context is not None:
 			try:
