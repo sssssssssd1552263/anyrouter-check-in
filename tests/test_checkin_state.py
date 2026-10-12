@@ -398,3 +398,21 @@ async def test_github_login_uses_account_specific_state(monkeypatch):
 	monkeypatch.setattr('checkin.login_with_github_cookies', login)
 	assert await check_in_account(account, 0, AppConfig(providers={'agentrouter': provider})) == (True, None, None)
 	login.assert_awaited_once_with('Agent test', provider, '123', github_cookies)
+
+
+async def test_fresh_login_without_reward_is_healthy_but_not_counted_as_credited(monkeypatch, capsys):
+	account = AccountConfig(cookies={}, name='Agent test', provider='agentrouter')
+	monkeypatch.setattr('checkin.is_debug_enabled', lambda: False)
+	monkeypatch.setattr('checkin.AppConfig.load_from_env', lambda: AppConfig(providers={}))
+	monkeypatch.setattr('checkin.load_accounts_config', lambda: [account])
+	monkeypatch.setattr('checkin.load_balance_hash', lambda: None)
+	monkeypatch.setattr('checkin.check_in_account', AsyncMock(return_value=('no_reward', None, None)))
+	with pytest.raises(SystemExit) as exited:
+		await main()
+	assert exited.value.code == 0
+	output = capsys.readouterr().out
+	assert 'Success: 0/1' in output
+	assert 'Login completed, no new reward: 1/1' in output
+	assert 'Failed: 0/1' in output
+	assert 'All accounts check-in successful' not in output
+	assert 'already checked' not in output
