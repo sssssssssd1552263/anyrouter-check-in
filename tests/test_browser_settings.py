@@ -20,9 +20,24 @@ def test_github_request_cookie_header_accepts_host_session_without_legacy_cookie
 	assert all(cookie['url'] == 'https://github.com/' for cookie in cookies)
 
 
+def test_github_request_cookie_header_preserves_equals_and_analytics_punctuation():
+	cookies = _github_browser_cookies('__Host-user_session_same_site=token==; _dd_s_v2=rum=1&id=(test)[1]&flags={a:b}; color_mode="auto"')
+	assert {cookie['name']: cookie['value'] for cookie in cookies} == {
+		'__Host-user_session_same_site': 'token==',
+		'_dd_s_v2': 'rum=1&id=(test)[1]&flags={a:b}',
+		'color_mode': '"auto"',
+	}
+
+
 @pytest.mark.parametrize('header', ['logged_in=yes', 'user_session=a\r\nHost: evil.test', '__Host-user_session_same_site='])
 def test_github_request_cookie_header_rejects_missing_auth_and_newlines(header):
 	from utils.browser import _github_browser_cookies
+	with pytest.raises(ValueError):
+		_github_browser_cookies(header)
+
+
+@pytest.mark.parametrize('header', ['user session=test', 'user_session=test; bad/name=value', 'user_session=test; missing_equals'])
+def test_github_request_cookie_header_rejects_invalid_names_or_pairs(header):
 	with pytest.raises(ValueError):
 		_github_browser_cookies(header)
 
