@@ -295,6 +295,9 @@ async def login_with_github_cookies(
 		if not api_user or not str(api_user).strip():
 			raise ValueError('Expected account user ID is required')
 		cookies = _github_browser_cookies(github_cookies)
+		if not any(cookie['name'] == 'user_session' and cookie['value'].strip() for cookie in cookies):
+			print(f'[FAILED] {account_name}: GitHub user_session is missing; refresh this account\'s GitHub login Cookie')
+			return result
 		origin = urlsplit(provider_config.domain)
 		settings = load_browser_login_settings(account_name, provider_config.name, persist_profile=False)
 		received = asyncio.get_running_loop().create_future()
