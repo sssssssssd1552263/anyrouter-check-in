@@ -13,7 +13,14 @@ def test_github_request_cookie_header_is_scoped_to_github():
 	assert cookies[1]['name'] == '__Host-user_session_same_site'
 
 
-@pytest.mark.parametrize('header', ['logged_in=yes', 'user_session=a\r\nHost: evil.test'])
+def test_github_request_cookie_header_accepts_host_session_without_legacy_cookie():
+	cookies = _github_browser_cookies('__Host-user_session_same_site=test-only; tz=Asia%2FShanghai')
+	assert cookies[0]['name'] == '__Host-user_session_same_site'
+	assert cookies[0]['value'] == 'test-only'
+	assert all(cookie['url'] == 'https://github.com/' for cookie in cookies)
+
+
+@pytest.mark.parametrize('header', ['logged_in=yes', 'user_session=a\r\nHost: evil.test', '__Host-user_session_same_site='])
 def test_github_request_cookie_header_rejects_missing_auth_and_newlines(header):
 	from utils.browser import _github_browser_cookies
 	with pytest.raises(ValueError):
