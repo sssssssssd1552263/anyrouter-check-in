@@ -1,9 +1,10 @@
 import sys
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
-from utils.browser import launch_login_context, load_browser_login_settings
+from utils.browser import _github_browser_cookies, launch_login_context, load_browser_login_settings, login_with_github_cookies
 
 
 def test_browser_login_settings_records_profile_persistence(monkeypatch, tmp_path):
@@ -98,3 +99,102 @@ async def test_launch_login_context_closes_browser_for_ephemeral_context(monkeyp
 	assert context.closed is True
 	assert browser.closed is True
 	assert not settings.profile_dir.exists()
+
+
+@pytest.fixture
+def github_login(monkeypatch, tmp_path):
+	monkeypatch.setenv('CHECKIN_BROWSER_PROFILE_DIR', str(tmp_path))
+	monkeypatch.setenv('CHECKIN_WAIT_TIMEOUT_MS', '100')
+	provider = SimpleNamespace(name='agentrouter', domain='https://agentrouter.org', login_path='/login', use_proxy=True)
+	page = SimpleNamespace(goto=AsyncMock())
+	handlers = {}
+	context = SimpleNamespace(
+		new_page=AsyncMock(return_value=page), add_cookies=AsyncMock(), close=AsyncMock(),
+		on=lambda event, handler: handlers.update({event: handler}),
+	)
+	launch = AsyncMock(return_value=context)
+	button = SimpleNamespace(click=AsyncMock())
+	monkeypatch.setattr('utils.browser.launch_login_context', launch)
+	monkeypatch.setattr('utils.browser.prepare_browser_page', AsyncMock())
+	monkeypatch.setattr('utils.browser.wait_for_waf_ready', AsyncMock())
+	monkeypatch.setattr('utils.browser._first_visible_locator', AsyncMock(return_value=button))
+	cookie = {'name': 'user_session', 'value': 'test-only', 'domain': '.github.com', 'path': '/', 'httpOnly': True}
+
+	async def run(payload=None, *, url='https://agentrouter.org/api/oauth/github?code=test&state=test&mode=login', status=200, click_error=False):
+		async def click(**kwargs):
+			if click_error:
+				raise TimeoutError('test')
+			response = SimpleNamespace(url=url, status=status, headers={'content-type': 'application/json'}, json=AsyncMock(return_value=payload))
+			await handlers['response'](response)
+		button.click.side_effect = click
+		result = await login_with_github_cookies('Account 1', provider, '42', [cookie])
+		assert launch.call_args.args[0].persist_profile is False
+		assert launch.call_args.kwargs == {'use_proxy': True}
+		context.add_cookies.assert_awaited_once_with([cookie])
+		context.close.assert_awaited_once()
+		assert not list(tmp_path.iterdir())
+		return result
+
+	return run
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('checked_in, expected', [(True, True), (False, None), (None, None), ('true', None)])
+async def test_github_login_requires_fresh_checked_in_boolean(github_login, checked_in, expected):
+	data = {'id': 42, 'quota': 12500000, 'used_quota': 250000}
+	if checked_in is not None:
+		data['checked_in'] = checked_in
+	result = await github_login({'success': True, 'data': data})
+	assert result[0] is expected
+	assert result[1] is None
+	assert result[2]['quota'] == 25
+	assert result[2]['used_quota'] == 0.5
+
+
+@pytest.mark.asyncio
+async def test_github_reward_does_not_require_balance(github_login):
+	assert await github_login({'success': True, 'data': {'id': 42, 'checked_in': True}}) == (True, None, None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('payload', [
+	{'success': True, 'data': {'id': 43, 'checked_in': True}},
+	{'success': False, 'data': {'id': 42, 'checked_in': True}},
+	{'success': True, 'message': 'bind', 'data': {'id': 42, 'checked_in': True}},
+	['not an object'],
+])
+async def test_github_login_rejects_wrong_identity_or_callback(github_login, payload):
+	assert await github_login(payload) == (False, None, None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('url', [
+	'https://agentrouter.org/api/user/self',
+	'https://other.example/api/oauth/github?mode=login',
+	'https://agentrouter.org.evil.example/api/oauth/github?mode=login',
+	'https://agentrouter.org/api/oauth/github?mode=bind',
+])
+async def test_github_login_ignores_self_and_other_origins(github_login, url):
+	assert await github_login({'success': True, 'data': {'id': 42, 'checked_in': True}}, url=url) == (False, None, None)
+
+
+@pytest.mark.asyncio
+async def test_github_login_closes_context_on_click_timeout(github_login):
+	assert await github_login(click_error=True) == (False, None, None)
+
+
+@pytest.mark.parametrize('invalid', [
+	{'domain': 'agentrouter.org'}, {'domain': 'github.com.evil.example'}, {'domain': '.sub.github.com'},
+	{'path': 'relative'}, {'name': ''}, {'value': ''}, {'secure': 'true'}, {'sameSite': 'invalid'},
+])
+def test_github_cookie_scope_validation(invalid):
+	cookie = {'name': 'user_session', 'value': 'test-only', 'domain': '.github.com', 'path': '/'}
+	with pytest.raises(ValueError):
+		_github_browser_cookies([{**cookie, **invalid}])
+
+
+def test_github_cookie_export_normalization_and_attribute_allowlist():
+	cookie = {'name': 'user_session', 'value': 'test-only', 'domain': 'github.com', 'path': '/'}
+	assert _github_browser_cookies([{**cookie, 'url': 'https://other.example', 'storeId': '0', 'sameSite': 'lax', 'expirationDate': 2000000000}]) == [
+		{**cookie, 'sameSite': 'Lax', 'expires': 2000000000},
+	]
