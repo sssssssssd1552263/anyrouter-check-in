@@ -243,6 +243,22 @@ async def test_github_timeout_logs_stage_and_categories_without_secrets(github_l
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('cookies', [
+	'__Host-user_session_same_site=private-cookie',
+	'user_session= ; __Host-user_session_same_site=private-cookie',
+	[{'name': '__Host-user_session_same_site', 'value': 'private-cookie', 'domain': 'github.com', 'path': '/'}],
+])
+async def test_github_missing_login_cookie_fails_before_browser_launch(monkeypatch, capsys, cookies):
+	launch = AsyncMock()
+	monkeypatch.setattr('utils.browser.launch_login_context', launch)
+	assert await login_with_github_cookies('Account 1', None, '42', cookies) == (False, None, None)
+	launch.assert_not_awaited()
+	output = capsys.readouterr().out
+	assert 'GitHub user_session is missing' in output
+	assert 'private-cookie' not in output
+
+
+@pytest.mark.asyncio
 async def test_github_cookie_validation_logs_no_cookie_value(capsys):
 	assert await login_with_github_cookies('Account 1', None, '42', 'user_session=private-cookie\r\n') == (False, None, None)
 	output = capsys.readouterr().out
