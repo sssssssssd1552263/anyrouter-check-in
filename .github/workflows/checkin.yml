@@ -91,7 +91,7 @@ jobs:
         CHECKIN_WAIT_TIMEOUT_MS: 120000
         ANYROUTER_ACCOUNTS: ${{ secrets.ANYROUTER_ACCOUNTS }}
         AGENTROUTER_GITHUB_COOKIES: ${{ secrets.AGENTROUTER_GITHUB_COOKIES }}
-        AGENTROUTER_GITHUB_COOKIES_431350: ${{ secrets.AGENTROUTER_GITHUB_COOKIES_431350 }}
+        AGENTROUTER_GITHUB_COOKIES_431350: ${{ secrets.AGENTROUTER_GITHUB_COOKIES_431350_V2 }}
         AGENTROUTER_GITHUB_COOKIES_609871: ${{ secrets.AGENTROUTER_GITHUB_COOKIES_609871 }}
         PROVIDERS: '{"agentrouter":{"domain":"https://agentrouter.org","use_proxy":true}}'
         DINGDING_WEBHOOK: ${{ secrets.DINGDING_WEBHOOK }}
@@ -118,6 +118,7 @@ jobs:
         import runpy
 
         accounts = json.loads(os.environ['ANYROUTER_ACCOUNTS'])
+        accounts.sort(key=lambda account: account.get('name') != 'Agent-1')
         for account in accounts:
             if account.get('provider') == 'agentrouter' and account.get('name') == 'Agent-3':
                 print(f"[INFO] Agent-3: configured api_user={account.get('api_user')}", flush=True)
