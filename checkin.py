@@ -26,6 +26,7 @@ from utils.browser import (
 	launch_login_context,
 	load_browser_login_settings,
 	login_with_email_form,
+	login_with_github_cookies,
 	navigate_login_page,
 	prepare_browser_page,
 	save_login_screenshot,
@@ -346,7 +347,7 @@ async def get_user_info_with_browser(account_name: str, provider_config, user_co
 				print(f'[FAILED] {account_name}: Browser API cleanup failed: {type(e).__name__}')
 				info = None
 	if info:
-		print(f'[SUCCESS] {account_name}: Browser API verified; additional reward not verified')
+		print(f'[UNVERIFIED] {account_name}: Browser API verified; check-in and additional reward not verified')
 	return info
 
 
@@ -380,24 +381,28 @@ def execute_check_in(client, account_name: str, provider_config, headers: dict):
 	if response.status_code == 200:
 		try:
 			result = response.json()
-			if result.get('ret') == 1 or result.get('code') == 0 or result.get('success'):
-				print(f'[SUCCESS] {account_name}: Check-in successful!')
-				return True
-			else:
-				error_msg = result.get('msg', result.get('message', 'Unknown error'))
-				already_checked_keywords = ['已经签到', '已签到', '重复签到', 'already checked', 'already signed']
-				if any(keyword in error_msg.lower() for keyword in already_checked_keywords):
-					print(f'[SUCCESS] {account_name}: Already checked in today')
-					return True
-				print(f'[FAILED] {account_name}: Check-in failed - {error_msg}')
-				return False
-		except json.JSONDecodeError:
-			if 'success' in response.text.lower():
-				print(f'[SUCCESS] {account_name}: Check-in successful!')
-				return True
-			else:
-				print(f'[FAILED] {account_name}: Check-in failed - Invalid response format')
-				return False
+			if not isinstance(result, dict):
+				raise ValueError('Expected a JSON object')
+		except ValueError:
+			print(f'[FAILED] {account_name}: Check-in failed - Invalid response format')
+			return False
+		error_msg = result.get('msg') or result.get('message') or 'Unknown error'
+		if not isinstance(error_msg, str):
+			error_msg = 'Invalid response message'
+		already_checked_keywords = ['已经签到', '已签到', '重复签到', 'already checked', 'already signed']
+		if any(keyword in error_msg.lower() for keyword in already_checked_keywords):
+			print(f'[SUCCESS] {account_name}: Provider reports already checked in')
+			return True
+		status_checks = [
+			type(result[key]) is type(expected) and result[key] == expected
+			for key, expected in (('success', True), ('ret', 1), ('code', 0))
+			if key in result
+		]
+		if status_checks and all(status_checks):
+			print(f'[SUCCESS] {account_name}: Check-in confirmed by provider response')
+			return True
+		print(f'[FAILED] {account_name}: Check-in failed - {error_msg}')
+		return False
 	else:
 		print(f'[FAILED] {account_name}: Check-in failed - HTTP {response.status_code}')
 		return False
@@ -405,42 +410,48 @@ def execute_check_in(client, account_name: str, provider_config, headers: dict):
 
 def format_check_in_notification(detail: dict) -> str:
 	"""格式化签到通知消息"""
+	if detail['success'] is True:
+		status = '  签到接口已确认成功或已签到'
+	elif detail['success'] is None:
+		status = '  签到未核实；用户信息接口通过不代表签到成功'
+	else:
+		status = '  签到失败'
 	if 'before_quota' not in detail:
 		return '\n'.join([
 			f'[CHECK-IN] {detail["name"]}',
 			'  ━━━━━━━━━━━━━━━━━━━━',
+			status,
 			f'  当前余额: ${detail["after_quota"]:.2f}  |  累计消耗: ${detail["after_used"]:.2f}',
-			'  接口验证通过；新增奖励未核实（仅取得一次余额快照）',
+			'  新增奖励金额未单独核实（仅取得一次余额快照）',
 		])
 	lines = [
 		f'[CHECK-IN] {detail["name"]}',
 		'  ━━━━━━━━━━━━━━━━━━━━',
-		'  签到前',
+		status,
+		'  首次余额快照',
 		f'     余额: ${detail["before_quota"]:.2f}  |  累计消耗: ${detail["before_used"]:.2f}',
-		'  签到后',
+		'  末次余额快照',
 		f'     余额: ${detail["after_quota"]:.2f}  |  累计消耗: ${detail["after_used"]:.2f}',
 	]
 
-	has_reward = detail['check_in_reward'] != 0
+	has_credit_change = detail['credit_change'] != 0
 	has_usage = detail['usage_increase'] != 0
 
-	if has_reward or has_usage:
+	if has_credit_change or has_usage:
 		lines.append('  ━━━━━━━━━━━━━━━━━━━━')
 
-		if not has_reward and has_usage:
-			lines.append('  今日已签到（期间有使用）')
-
-		if has_reward:
-			lines.append(f'  签到获得: +${detail["check_in_reward"]:.2f}')
+		if has_credit_change:
+			lines.append(f'  观测总额度变化（余额＋累计消耗）: ${detail["credit_change"]:+.2f}（来源未核实）')
 
 		if has_usage:
-			lines.append(f'  期间消耗: ${detail["usage_increase"]:.2f}')
+			lines.append(f'  累计消耗变化: ${detail["usage_increase"]:+.2f}')
 
 		if detail['balance_change'] != 0:
 			change_symbol = '+' if detail['balance_change'] > 0 else ''
 			lines.append(f'  余额变化: {change_symbol}${detail["balance_change"]:.2f}')
 	else:
-		lines.extend(['  ━━━━━━━━━━━━━━━━━━━━', '  今日已签到，无变化'])
+		lines.extend(['  ━━━━━━━━━━━━━━━━━━━━', '  两次余额快照无变化'])
+	lines.append('  余额快照变化不能单独确认签到奖励')
 
 	return '\n'.join(lines)
 
@@ -456,6 +467,19 @@ async def check_in_account(account: AccountConfig, account_index: int, app_confi
 		return False, None, None
 
 	print(f'[INFO] {account_name}: Using provider "{account.provider}" ({provider_config.domain})')
+	if account.provider == 'agentrouter':
+		try:
+			github_accounts = json.loads(os.getenv('AGENTROUTER_GITHUB_COOKIES', '{}'))
+			if not isinstance(github_accounts, dict):
+				raise ValueError('Expected account mapping')
+		except (ValueError, TypeError):
+			print(f'[FAILED] {account_name}: Invalid GitHub login configuration')
+			return False, None, None
+		if str(account.api_user) in github_accounts:
+			return await login_with_github_cookies(
+				account_name, provider_config, account.api_user, github_accounts[str(account.api_user)]
+			)
+		print(f'[UNVERIFIED] {account_name}: GitHub login state is missing; session balance reads cannot claim a reward')
 
 	# 邮箱密码优先
 	all_cookies = None
@@ -498,14 +522,14 @@ async def check_in_account(account: AccountConfig, account_index: int, app_confi
 			use_proxy=provider_config.use_proxy,
 		)
 	if (
-		not result[0]
+		result[0] is False
 		and account.provider == 'agentrouter'
 		and auth_method == 'session cookies'
 		and not provider_config.needs_manual_check_in()
 	):
 		info = await get_user_info_with_browser(account_name, provider_config, user_cookies, account.api_user)
 		if info:
-			return True, None, info
+			return None, None, info
 	return result
 
 
@@ -517,7 +541,7 @@ def run_check_in_requests(
 	*,
 	api_user_override: str | None = None,
 	use_proxy: bool = False,
-) -> tuple[bool, dict | None, dict | None]:
+) -> tuple[bool | None, dict | None, dict | None]:
 	"""执行 HTTP 签到请求（同步，避免在 async 上下文中使用阻塞 httpx）。"""
 	try:
 		client_kwargs: dict = {'http2': True, 'timeout': 30.0}
@@ -564,8 +588,8 @@ def run_check_in_requests(
 
 			user_info_after = get_user_info(client, headers, user_info_url)
 			if user_info_after and user_info_after.get('success'):
-				print(f'[INFO] {account_name}: Check-in completed automatically (triggered by user info request)')
-				return True, user_info_before, user_info_after
+				print(f'[UNVERIFIED] {account_name}: User info retrieved; check-in and additional reward not verified')
+				return None, user_info_before, user_info_after
 			error = user_info_after.get('error', 'Unknown error') if user_info_after else 'Unknown error'
 			print(f'[FAILED] {account_name}: Auto check-in failed - {error}')
 			return False, user_info_before, user_info_after
@@ -608,6 +632,7 @@ async def main():
 	last_balance_hash = load_balance_hash()
 
 	success_count = 0
+	unverified_count = 0
 	total_count = len(accounts)
 	notification_content = []
 	current_balances = {}
@@ -619,8 +644,10 @@ async def main():
 		account_key = f'account_{i + 1}'
 		try:
 			success, user_info_before, user_info_after = await check_in_account(account, i, app_config)
-			if success:
+			if success is True:
 				success_count += 1
+			elif success is None:
+				unverified_count += 1
 
 			should_notify_this_account = False
 
@@ -628,7 +655,8 @@ async def main():
 				should_notify_this_account = True
 				need_notify = True
 				account_name = account.get_display_name(i)
-				print(f'[NOTIFY] {account_name} failed, will send notification')
+				status = 'unverified' if success is None else 'failed'
+				print(f'[NOTIFY] {account_name} {status}, will send notification')
 
 			if user_info_after and user_info_after.get('success'):
 				current_quota = user_info_after['quota']
@@ -644,7 +672,7 @@ async def main():
 					total_before = before_quota + before_used
 					total_after = after_quota + after_used
 
-					check_in_reward = total_after - total_before
+					credit_change = total_after - total_before
 					usage_increase = after_used - before_used
 					balance_change = after_quota - before_quota
 
@@ -654,7 +682,7 @@ async def main():
 						'before_used': before_used,
 						'after_quota': after_quota,
 						'after_used': after_used,
-						'check_in_reward': check_in_reward,
+						'credit_change': credit_change,
 						'usage_increase': usage_increase,
 						'balance_change': balance_change,
 						'success': success,
@@ -669,10 +697,10 @@ async def main():
 
 			if should_notify_this_account:
 				account_name = account.get_display_name(i)
-				status = '[SUCCESS]' if success else '[FAIL]'
+				status = '[UNVERIFIED]' if success is None else '[FAIL]'
 				account_result = f'{status} {account_name}'
-				if user_info_after and user_info_after.get('success'):
-					account_result += f'\n{user_info_after["display"]}'
+				if account_key in account_check_in_details:
+					account_result += '\n' + format_check_in_notification(account_check_in_details[account_key])
 				elif user_info_after:
 					account_result += f'\n{user_info_after.get("error", "Unknown error")}'
 				notification_content.append(account_result)
@@ -713,13 +741,16 @@ async def main():
 		summary = [
 			'[STATS] Check-in result statistics:',
 			f'[SUCCESS] Success: {success_count}/{total_count}',
-			f'[FAIL] Failed: {total_count - success_count}/{total_count}',
+			f'[UNVERIFIED] Unverified: {unverified_count}/{total_count}',
+			f'[FAIL] Failed: {total_count - success_count - unverified_count}/{total_count}',
 		]
 
 		if success_count == total_count:
 			summary.append('[SUCCESS] All accounts check-in successful!')
 		elif success_count > 0:
 			summary.append('[WARN] Some accounts check-in successful')
+		elif unverified_count:
+			summary.append('[WARN] Check-in remains unverified; no reward confirmation received')
 		else:
 			summary.append('[ERROR] All accounts check-in failed')
 
