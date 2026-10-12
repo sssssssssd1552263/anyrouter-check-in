@@ -388,16 +388,20 @@ def test_unchanged_balance_does_not_invent_daily_reward(success):
 	assert '两次余额快照无变化' in message
 
 
-async def test_github_login_uses_account_specific_state(monkeypatch):
+@pytest.mark.parametrize('refresh', [None, 'user_session=new-private-session'])
+async def test_github_login_uses_account_specific_state(monkeypatch, refresh):
 	import json
 	provider = ProviderConfig(name='agentrouter', domain='https://provider.test', sign_in_path=None)
 	account = AccountConfig(cookies={'session': 'old'}, api_user='123', provider='agentrouter', name='Agent test')
 	github_cookies = [{'name': 'user_session', 'value': 'private', 'domain': 'github.com', 'path': '/'}]
 	monkeypatch.setenv('AGENTROUTER_GITHUB_COOKIES', json.dumps({'123': github_cookies, '456': []}))
+	monkeypatch.setenv('AGENTROUTER_GITHUB_COOKIES_456', 'user_session=other-private-session')
+	if refresh:
+		monkeypatch.setenv('AGENTROUTER_GITHUB_COOKIES_123', refresh)
 	login = AsyncMock(return_value=(True, None, None))
 	monkeypatch.setattr('checkin.login_with_github_cookies', login)
 	assert await check_in_account(account, 0, AppConfig(providers={'agentrouter': provider})) == (True, None, None)
-	login.assert_awaited_once_with('Agent test', provider, '123', github_cookies)
+	login.assert_awaited_once_with('Agent test', provider, '123', refresh or github_cookies)
 
 
 async def test_fresh_login_without_reward_is_healthy_but_not_counted_as_credited(monkeypatch, capsys):
