@@ -477,6 +477,10 @@ async def check_in_account(account: AccountConfig, account_index: int, app_confi
 		except (ValueError, TypeError):
 			print(f'[FAILED] {account_name}: Invalid GitHub login configuration')
 			return False, None, None
+		# 单账号刷新保留其他账号已加密保存的登录态。
+		refreshed_cookies = os.getenv(f'AGENTROUTER_GITHUB_COOKIES_{account.api_user}', '').strip()
+		if refreshed_cookies:
+			github_accounts[str(account.api_user)] = refreshed_cookies
 		if str(account.api_user) in github_accounts:
 			return await login_with_github_cookies(
 				account_name, provider_config, account.api_user, github_accounts[str(account.api_user)]
