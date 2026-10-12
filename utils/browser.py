@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import os
 import re
 import time
@@ -10,6 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
+from urllib.parse import parse_qs, urlsplit
 
 from utils.debug import debug_print, is_debug_enabled
 from utils.popups import dismiss_popups, setup_popup_guard
@@ -233,6 +235,109 @@ async def launch_login_context(settings: BrowserLoginSettings, *, use_proxy: boo
 	browser = await launch_async(**launch_kwargs)
 	context = await browser.new_context(**context_kwargs)
 	return _EphemeralBrowserContext(context, browser)
+
+
+def _github_browser_cookies(cookies: list[dict]) -> list[dict]:
+	if not isinstance(cookies, list) or not cookies:
+		raise ValueError('GitHub browser cookies must be a nonempty list')
+	result = []
+	for cookie in cookies:
+		if not isinstance(cookie, dict) or cookie.get('domain') not in ('github.com', '.github.com'):
+			raise ValueError('GitHub cookie domain rejected')
+		if any(not isinstance(cookie.get(key), str) or not cookie[key] for key in ('name', 'value', 'path')):
+			raise ValueError('Invalid GitHub cookie fields')
+		if not cookie['path'].startswith('/') or any('\r' in cookie[key] or '\n' in cookie[key] for key in ('name', 'value', 'path')):
+			raise ValueError('Invalid GitHub cookie path or characters')
+		clean = {key: cookie[key] for key in ('name', 'value', 'domain', 'path')}
+		for key in ('secure', 'httpOnly'):
+			if key in cookie:
+				if type(cookie[key]) is not bool:
+					raise ValueError('Invalid GitHub cookie flag')
+				clean[key] = cookie[key]
+		if 'expires' in cookie or 'expirationDate' in cookie:
+			expires = cookie.get('expires', cookie.get('expirationDate'))
+			if type(expires) not in (int, float) or not math.isfinite(expires) or (expires < 0 and expires != -1):
+				raise ValueError('Invalid GitHub cookie expiry')
+			clean['expires'] = expires
+		if 'sameSite' in cookie:
+			same_site = str(cookie['sameSite']).lower()
+			if same_site not in ('strict', 'lax', 'none', 'no_restriction', 'unspecified'):
+				raise ValueError('Invalid GitHub cookie SameSite')
+			if same_site != 'unspecified':
+				clean['sameSite'] = 'None' if same_site == 'no_restriction' else same_site.title()
+		result.append(clean)
+	return result
+
+
+async def login_with_github_cookies(
+	account_name: str, provider_config, api_user, github_cookies: list[dict]
+) -> tuple[bool | None, None, dict | None]:
+	"""仅用本次 GitHub OAuth 回调确认奖励，不复用站点登录态。"""
+	context = None
+	result = (False, None, None)
+	try:
+		if not api_user or not str(api_user).strip():
+			raise ValueError('Expected account user ID is required')
+		cookies = _github_browser_cookies(github_cookies)
+		origin = urlsplit(provider_config.domain)
+		settings = load_browser_login_settings(account_name, provider_config.name, persist_profile=False)
+		received = asyncio.get_running_loop().create_future()
+
+		async def on_response(response):
+			url = urlsplit(response.url)
+			if received.done() or (url.scheme, url.netloc) != (origin.scheme, origin.netloc) or url.path != '/api/oauth/github':
+				return
+			callback_result = (False, None, None)
+			try:
+				if parse_qs(url.query, keep_blank_values=True).get('mode', ['login']) != ['login']:
+					raise ValueError('OAuth login mode required')
+				if response.status != 200 or 'application/json' not in response.headers.get('content-type', '').lower():
+					raise ValueError('OAuth JSON response required')
+				payload = await response.json()
+				data = payload.get('data') if isinstance(payload, dict) else None
+				if not isinstance(data, dict) or payload.get('success') is not True or payload.get('message') == 'bind' or str(data.get('id')) != str(api_user):
+					raise ValueError('OAuth identity or status rejected')
+				info = None
+				balances = [data.get(key) for key in ('quota', 'used_quota')]
+				if all(type(value) in (int, float) and math.isfinite(value) and value >= 0 for value in balances):
+					quota, used = (round(value / 500000, 2) for value in balances)
+					info = {'success': True, 'quota': quota, 'used_quota': used, 'display': f':money: Current balance: ${quota}, Used: ${used}'}
+				callback_result = (True if data.get('checked_in') is True else None, None, info)
+			except Exception:
+				print(f'[FAILED] {account_name}: GitHub OAuth response rejected')
+			if not received.done():
+				received.set_result(callback_result)
+
+		async with asyncio.timeout(settings.wait_timeout_ms / 1000):
+			context = await launch_login_context(settings, use_proxy=provider_config.use_proxy)
+			await context.add_cookies(cookies)
+			page = await context.new_page()
+			await prepare_browser_page(page)
+			await page.goto(f'{provider_config.domain.rstrip("/")}{provider_config.login_path}', wait_until='domcontentloaded', timeout=settings.wait_timeout_ms)
+			await wait_for_waf_ready(page, settings.wait_timeout_ms)
+			context.on('response', on_response)
+			button = await _first_visible_locator(page, (
+				'button:has(.semi-icon-github)', 'button:has([aria-label*="github" i])',
+			))
+			if button is None:
+				button = page.get_by_role('button', name=re.compile('github', re.I)).first
+			# GitHub consent, CAPTCHA and two-factor prompts require an interactive login.
+			await button.click(timeout=min(settings.wait_timeout_ms, FORM_ACTION_TIMEOUT_MS))
+			result = await received
+			if result[0] is True:
+				print(f'[SUCCESS] {account_name}: Server confirmed this login reward (checked_in=true)')
+			elif result[0] is None:
+				print(f'[UNVERIFIED] {account_name}: Login completed without new credit confirmation')
+	except Exception:
+		print(f'[FAILED] {account_name}: GitHub login required or OAuth unavailable; refresh the authorized browser login')
+	finally:
+		if context is not None:
+			try:
+				await context.close()
+			except Exception:
+				print(f'[FAILED] {account_name}: GitHub browser cleanup failed')
+				result = (False, None, None)
+	return result
 
 
 def get_screenshot_dir() -> Path:
