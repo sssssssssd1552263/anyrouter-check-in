@@ -121,10 +121,11 @@ def github_login(monkeypatch, tmp_path):
 	monkeypatch.setenv('CHECKIN_BROWSER_PROFILE_DIR', str(tmp_path))
 	monkeypatch.setenv('CHECKIN_WAIT_TIMEOUT_MS', '100')
 	provider = SimpleNamespace(name='agentrouter', domain='https://agentrouter.org', login_path='/login', use_proxy=True)
-	page = SimpleNamespace(goto=AsyncMock())
+	page = SimpleNamespace(goto=AsyncMock(), url='https://agentrouter.org/login')
 	handlers = {}
 	context = SimpleNamespace(
 		new_page=AsyncMock(return_value=page), add_cookies=AsyncMock(), close=AsyncMock(),
+		pages=[page],
 		on=lambda event, handler: handlers.update({event: handler}),
 	)
 	launch = AsyncMock(return_value=context)
@@ -135,10 +136,11 @@ def github_login(monkeypatch, tmp_path):
 	monkeypatch.setattr('utils.browser._first_visible_locator', AsyncMock(return_value=button))
 	cookie = {'name': 'user_session', 'value': 'test-only', 'domain': '.github.com', 'path': '/', 'httpOnly': True}
 
-	async def run(payload=None, *, url='https://agentrouter.org/api/oauth/github?code=test&state=test&mode=login', status=200, click_error=False):
+	async def run(payload=None, *, url='https://agentrouter.org/api/oauth/github?code=test&state=test&mode=login', status=200, click_error=False, page_url='https://agentrouter.org/login'):
+		page.url = page_url
 		async def click(**kwargs):
 			if click_error:
-				raise TimeoutError('test')
+				raise TimeoutError('private-exception-message')
 			response = SimpleNamespace(url=url, status=status, headers={'content-type': 'application/json'}, json=AsyncMock(return_value=payload))
 			await handlers['response'](response)
 		button.click.side_effect = click
@@ -154,16 +156,20 @@ def github_login(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('checked_in, expected', [(True, True), (False, None), (None, None), ('true', None)])
-async def test_github_login_requires_fresh_checked_in_boolean(github_login, checked_in, expected):
+@pytest.mark.parametrize('checked_in, expected', [(True, True), (False, 'no_reward'), (None, None), ('true', None), (0, None)])
+async def test_github_login_requires_fresh_checked_in_boolean(github_login, capsys, checked_in, expected):
 	data = {'id': 42, 'quota': 12500000, 'used_quota': 250000}
 	if checked_in is not None:
 		data['checked_in'] = checked_in
 	result = await github_login({'success': True, 'data': data})
-	assert result[0] is expected
+	assert result[0] == expected
 	assert result[1] is None
 	assert result[2]['quota'] == 25
 	assert result[2]['used_quota'] == 0.5
+	if expected == 'no_reward':
+		output = capsys.readouterr().out
+		assert 'no new credit this run' in output
+		assert '[SUCCESS]' not in output and 'already' not in output.lower()
 
 
 @pytest.mark.asyncio
@@ -196,6 +202,30 @@ async def test_github_login_ignores_self_and_other_origins(github_login, url):
 @pytest.mark.asyncio
 async def test_github_login_closes_context_on_click_timeout(github_login):
 	assert await github_login(click_error=True) == (False, None, None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('page_url, category', [
+	('https://github.com/login?return_to=private-query-value', 'GitHub login'),
+	('https://github.com/login/oauth/authorize?state=private-query-value', 'GitHub authorization'),
+	('https://github.com/sessions/two-factor?state=private-query-value', 'GitHub challenge'),
+	('https://agentrouter.org/login?state=private-query-value', 'provider login'),
+	('https://agentrouter.org/oauth/github?code=private-query-value', 'provider callback'),
+])
+async def test_github_timeout_logs_stage_and_categories_without_secrets(github_login, capsys, page_url, category):
+	assert await github_login(click_error=True, page_url=page_url) == (False, None, None)
+	output = capsys.readouterr().out
+	assert 'at GitHub button (TimeoutError)' in output
+	assert f'page types: {category}' in output
+	assert all(secret not in output for secret in ('private-query-value', 'private-exception-message', 'test-only', 'https://'))
+
+
+@pytest.mark.asyncio
+async def test_github_cookie_validation_logs_no_cookie_value(capsys):
+	assert await login_with_github_cookies('Account 1', None, '42', 'user_session=private-cookie\r\n') == (False, None, None)
+	output = capsys.readouterr().out
+	assert 'at cookie validation (ValueError)' in output
+	assert 'private-cookie' not in output
 
 
 @pytest.mark.parametrize('invalid', [
