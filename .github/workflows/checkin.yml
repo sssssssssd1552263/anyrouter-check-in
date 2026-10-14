@@ -1,7 +1,8 @@
 name: AnyRouter 自动签到
 on:
   schedule:
-    - cron: '0 */6 * * *'
+    # 北京时间 08:15、14:15、20:15，避开 08:00 刷新前。
+    - cron: '15 0,6,12 * * *'
   workflow_dispatch:
     inputs:
       debug:
@@ -116,8 +117,10 @@ jobs:
         import json
         import os
         import runpy
+        from datetime import datetime, timezone
 
         accounts = json.loads(os.environ['ANYROUTER_ACCOUNTS'])
+        print(f'[INFO] AnyRouter check-in date: {datetime.now(timezone.utc).date()} (resets at 08:00 Asia/Shanghai)', flush=True)
         accounts.sort(key=lambda account: account.get('name') != 'Agent-1')
         for account in accounts:
             if account.get('provider') == 'agentrouter' and account.get('name') == 'Agent-3':
