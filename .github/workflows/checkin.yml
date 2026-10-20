@@ -94,7 +94,7 @@ jobs:
         AGENTROUTER_GITHUB_COOKIES: ${{ secrets.AGENTROUTER_GITHUB_COOKIES }}
         AGENTROUTER_GITHUB_COOKIES_431350: ${{ secrets.AGENTROUTER_GITHUB_COOKIES_431350_V2 }}
         AGENTROUTER_GITHUB_COOKIES_609871: ${{ secrets.AGENTROUTER_GITHUB_COOKIES_609871 }}
-        PROVIDERS: '{"agentrouter":{"domain":"https://agentrouter.org","use_proxy":true}}'
+        PROVIDERS: '{"anyrouter":{"domain":"https://anyrouter.top","use_proxy":true},"agentrouter":{"domain":"https://agentrouter.org","use_proxy":true}}'
         DINGDING_WEBHOOK: ${{ secrets.DINGDING_WEBHOOK }}
         EMAIL_USER: ${{ secrets.EMAIL_USER }}
         EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
