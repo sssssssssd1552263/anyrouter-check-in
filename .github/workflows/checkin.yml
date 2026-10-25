@@ -2,7 +2,9 @@ name: AnyRouter 自动签到
 on:
   schedule:
     # 北京时间 08:15、14:15、20:15，避开 08:00 刷新前。
-    - cron: '15 0,6,12 * * *'
+    - cron: '15 0 * * *'
+    - cron: '15 6 * * *'
+    - cron: '15 12 * * *'
   workflow_dispatch:
     inputs:
       debug:
