@@ -30,11 +30,23 @@ echo "[INFO] Downloading mihomo ${MIHOMO_VERSION}..."
 ARCHIVE="mihomo-linux-amd64-${MIHOMO_VERSION}.gz"
 if ! curl --retry 3 --retry-delay 5 --retry-all-errors -fsSL -o "${ARCHIVE}" \
 	"https://github.com/MetaCubeX/mihomo/releases/download/${MIHOMO_VERSION}/${ARCHIVE}"; then
-	echo "[WARN] Failed to download mihomo ${MIHOMO_VERSION}, skip proxy setup"
-	if [[ "${PROXY_REQUIRED}" == "true" ]]; then
-		exit 1
+	echo "[WARN] Release download failed; retrying via the official GitHub API"
+	API_HEADERS=()
+	if [[ -n "${GH_TOKEN:-}" ]]; then
+		API_HEADERS=(-H "Authorization: Bearer ${GH_TOKEN}")
 	fi
-	exit 0
+	ASSET_URL="$(curl --retry 3 --retry-delay 5 --retry-all-errors -fsSL \
+		"${API_HEADERS[@]}" -H 'Accept: application/vnd.github+json' \
+		"https://api.github.com/repos/MetaCubeX/mihomo/releases/tags/${MIHOMO_VERSION}" \
+		| python3 -c 'import json, sys; print(next(asset["url"] for asset in json.load(sys.stdin)["assets"] if asset["name"] == sys.argv[1]))' "${ARCHIVE}")" || ASSET_URL=""
+	if [[ -z "${ASSET_URL}" ]] || ! curl --retry 3 --retry-delay 5 --retry-all-errors -fsSL \
+		"${API_HEADERS[@]}" -H 'Accept: application/octet-stream' -o "${ARCHIVE}" "${ASSET_URL}"; then
+		echo "[WARN] Failed to download mihomo ${MIHOMO_VERSION}, skip proxy setup"
+		if [[ "${PROXY_REQUIRED}" == "true" ]]; then
+			exit 1
+		fi
+		exit 0
+	fi
 fi
 gunzip -f "${ARCHIVE}"
 chmod +x "mihomo-linux-amd64-${MIHOMO_VERSION}"
