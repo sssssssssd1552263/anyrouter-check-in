@@ -1,0 +1,66 @@
+name: IOP 论文状态监控
+
+on:
+  schedule:
+    # Beijing time: 02:45, 08:45, 14:45, 20:45.
+    - cron: '45 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: iop-manuscript-monitor
+  cancel-in-progress: false
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: production
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+        with:
+          version: latest
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: 缓存 UV 依赖
+        uses: actions/cache@v5
+        with:
+          path: ~/.cache/uv
+          key: ${{ runner.os }}-uv-${{ hashFiles('pyproject.toml', 'uv.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-uv-
+
+      - name: 验证状态监控测试
+        run: uv run pytest tests/test_iop_monitor.py -q -o addopts=''
+
+      - name: 恢复上次成功处理的状态
+        uses: actions/cache/restore@v5
+        with:
+          path: .iop-monitor/state.json
+          key: iop-state-v1-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            iop-state-v1-${{ github.ref_name }}-
+
+      - name: 检查论文状态，变化时发送邮件
+        env:
+          IOP_MANUSCRIPT_ID: ${{ secrets.IOP_MANUSCRIPT_ID }}
+          IOP_BASELINE_STATUS: ${{ secrets.IOP_BASELINE_STATUS }}
+          EMAIL_USER: ${{ secrets.IOP_EMAIL_USER }}
+          EMAIL_PASS: ${{ secrets.IOP_EMAIL_PASS }}
+          EMAIL_TO: ${{ secrets.IOP_EMAIL_TO }}
+          CUSTOM_SMTP_SERVER: smtp.qq.com
+        run: uv run --no-dev python iop_monitor.py
+
+      - name: 保存本次成功处理的状态
+        if: success()
+        uses: actions/cache/save@v5
+        with:
+          path: .iop-monitor/state.json
+          key: iop-state-v1-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
