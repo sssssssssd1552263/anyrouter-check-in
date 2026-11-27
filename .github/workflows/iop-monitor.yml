@@ -2,8 +2,8 @@ name: IOP 论文状态监控
 
 on:
   schedule:
-    # Beijing time: 02:45, 08:45, 14:45, 20:45.
-    - cron: '45 */6 * * *'
+    # Beijing time: every two hours, from 00:45 through 22:45.
+    - cron: '45 */2 * * *'
   workflow_dispatch:
 
 permissions:
